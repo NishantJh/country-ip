@@ -1,0 +1,39 @@
+name: Update GeoIP Database
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Runs every Sunday at midnight
+  workflow_dispatch: 
+
+jobs:
+  update-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (shallow clone)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # Only fetches the latest commit to save time/space
+
+      - name: Download Latest Country DB
+        run: |
+          mkdir -p data
+          curl -L "https://jsdelivr.net" -o data/GeoLite2-Country.mmdb.gz
+          gunzip -f data/GeoLite2-Country.mmdb.gz
+
+      - name: Force Push Update (Cleans History)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@://github.com"
+          
+          # Stage the new file
+          git add data/GeoLite2-Country.mmdb
+          
+          # Only proceed if the database actually changed
+          if ! git diff-index --quiet HEAD; then
+            # Amend the very last commit if it was a bot update, or make a clean overwrite
+            git commit --amend -m "chore: automated geoip database update" || git commit -m "chore: automated geoip database update"
+            
+            # Force push to overwrite the remote history on the current branch
+            git push origin HEAD --force
+          else
+            echo "No changes detected in the database."
+          fi
