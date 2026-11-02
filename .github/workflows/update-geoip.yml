@@ -1,37 +1,107 @@
+
 name: Update GeoIP Database
+
 on:
   schedule:
+    # Every Sunday at 00:00 UTC
     - cron: '0 0 * * 0'
-  workflow_dispatch: 
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-geoip-database
+  cancel-in-progress: false
 
 jobs:
   update-db:
+    name: Download and Update GeoIP
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository (shallow clone)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1 
+          fetch-depth: 1
 
-      - name: Download Latest Country DB
+      - name: Install validation dependency
         run: |
+          python -m pip install --disable-pip-version-check maxminddb
+
+      - name: Download GeoIP database
+        shell: bash
+        run: |
+          set -euo pipefail
+
           mkdir -p data
-          # Building the URL dynamically to bypass the system's text filter
-          SUBDOMAIN="raw"
-          DOMAIN="githubusercontent.com"
-          curl -L "https://${SUBDOMAIN}.${DOMAIN}/wp-statistics/GeoLite2-Country/master/GeoLite2-Country.mmdb.gz" -o data/GeoLite2-Country.mmdb.gz
-          gunzip -f data/GeoLite2-Country.mmdb.gz
 
-      - name: Force Push Update (Cleans History)
+          URL="https://raw.githubusercontent.com/wp-statistics/GeoLite2-Country/master/GeoLite2-Country.mmdb.gz"
+
+          echo "Downloading GeoIP database..."
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --output /tmp/GeoLite2-Country.mmdb.gz \
+            "$URL"
+
+          test -s /tmp/GeoLite2-Country.mmdb.gz
+
+          echo "Checking gzip integrity..."
+          gzip -t /tmp/GeoLite2-Country.mmdb.gz
+
+          echo "Extracting database..."
+          gunzip -c /tmp/GeoLite2-Country.mmdb.gz \
+            > /tmp/GeoLite2-Country.mmdb
+
+          test -s /tmp/GeoLite2-Country.mmdb
+
+          echo "Validating MMDB database..."
+          python - <<'PY'
+          import maxminddb
+
+          path = "/tmp/GeoLite2-Country.mmdb"
+
+          with maxminddb.open_database(path) as reader:
+              metadata = reader.metadata()
+              result = reader.get("1.1.1.1")
+
+              assert metadata.database_type.startswith("GeoLite2-Country"), (
+                  f"Unexpected database type: {metadata.database_type}"
+              )
+
+              assert result is not None, "Database lookup returned no result"
+
+              print(f"Database: {metadata.database_type}")
+              print(f"Build epoch: {metadata.build_epoch}")
+              print("Validation successful.")
+          PY
+
+          # Replace the existing database only after validation
+          mv /tmp/GeoLite2-Country.mmdb data/GeoLite2-Country.mmdb
+
+          echo "GeoIP database downloaded and validated."
+
+      - name: Commit database update
+        shell: bash
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
-          
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add data/GeoLite2-Country.mmdb
-          
-          if ! git diff-index --quiet HEAD; then
-            git commit --amend -m "chore: automated geoip database update" || git commit -m "chore: automated geoip database update"
-            git push origin HEAD --force
-          else
-            echo "No changes detected in the database."
+
+          if git diff --cached --quiet; then
+            echo "No database changes detected."
+            exit 0
           fi
+
+          git commit -m "chore: update GeoIP country database"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
